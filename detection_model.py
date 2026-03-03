@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 import cv2
-from ultralytics import YOLO
+from ultralytics import YOLO #type: ignore
 from collections import deque
 
 class ObjectDetector:
@@ -70,14 +70,16 @@ class ObjectDetector:
         # Initialize tracking trajectories
         self.tracking_trajectories = {}
     
-    def detect(self, image, track=True):
+    def detect(self, image, track=True, stream=False):
         """
         Detect objects in an image
         
         Args:
             image (numpy.ndarray): Input image (BGR format)
             track (bool): Whether to track objects across frames
-            
+            stream (bool): Use streaming generator mode to reduce memory usage
+                (True keeps only current frame in memory, False collects all results)
+        
         Returns:
             tuple: (annotated_image, detections)
                 - annotated_image (numpy.ndarray): Image with detections drawn
@@ -91,55 +93,71 @@ class ObjectDetector:
         try:
             if track:
                 # Run inference with tracking
-                results = self.model.track(image, verbose=False, device=self.device, persist=True)
+                results = self.model.track(
+                    image,
+                    verbose=False,
+                    device=self.device,
+                    persist=True,
+                    stream=stream
+                )
             else:
                 # Run inference without tracking
-                results = self.model.predict(image, verbose=False, device=self.device)
+                results = self.model.predict(
+                    image,
+                    verbose=False,
+                    device=self.device,
+                    stream=stream
+                )
         except RuntimeError as e:
             # Handle potential MPS errors
             if self.device == 'mps' and "not currently implemented for the MPS device" in str(e):
                 print(f"MPS error during detection: {e}")
                 print("Falling back to CPU for this frame")
                 if track:
-                    results = self.model.track(image, verbose=False, device='cpu', persist=True)
+                    results = self.model.track(
+                        image,
+                        verbose=False,
+                        device='cpu',
+                        persist=True,
+                        stream=stream
+                    )
                 else:
-                    results = self.model.predict(image, verbose=False, device='cpu')
+                    results = self.model.predict(
+                        image,
+                        verbose=False,
+                        device='cpu',
+                        stream=stream
+                    )
             else:
                 # Re-raise the error if not MPS or not an implementation error
                 raise
         
         if track:
-            # Clean up trajectories for objects that are no longer tracked
-            for id_ in list(self.tracking_trajectories.keys()):
-                if id_ not in [int(bbox.id) for predictions in results if predictions is not None 
-                              for bbox in predictions.boxes if bbox.id is not None]:
-                    del self.tracking_trajectories[id_]
-            
-            # Process results
+            # process results while collecting current ids for cleanup
+            current_ids = set()
             for predictions in results:
                 if predictions is None:
                     continue
-                
                 if predictions.boxes is None:
                     continue
-                
+
                 # Process boxes
                 for bbox in predictions.boxes:
                     # Extract information
                     scores = bbox.conf
                     classes = bbox.cls
                     bbox_coords = bbox.xyxy
-                    
+
                     # Check if tracking IDs are available
                     if hasattr(bbox, 'id') and bbox.id is not None:
                         ids = bbox.id
                     else:
                         ids = [None] * len(scores)
-                    
+
                     # Process each detection
                     for score, class_id, bbox_coord, id_ in zip(scores, classes, bbox_coords, ids):
                         xmin, ymin, xmax, ymax = bbox_coord.cpu().numpy()
-                        
+
                         # Add to detections list
                         detections.append([
                             [xmin, ymin, xmax, ymax],  # bbox
@@ -147,13 +165,13 @@ class ObjectDetector:
                             int(class_id),             # class id
                             int(id_) if id_ is not None else None  # object id
                         ])
-                        
+
                         # Draw bounding box
                         cv2.rectangle(annotated_image, 
                                      (int(xmin), int(ymin)), 
                                      (int(xmax), int(ymax)), 
                                      (0, 0, 225), 2)
-                        
+
                         # Add label
                         label = f"ID: {int(id_) if id_ is not None else 'N/A'} {predictions.names[int(class_id)]} {float(score):.2f}"
                         text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -165,17 +183,24 @@ class ObjectDetector:
                         cv2.putText(annotated_image, label, 
                                    (int(xmin), int(ymin) - 7), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        
-                        # Update tracking trajectories
+
+                        # Update tracking trajectories and current ids
                         if id_ is not None:
+                            iid = int(id_)
+                            current_ids.add(iid)
                             centroid_x = (xmin + xmax) / 2
                             centroid_y = (ymin + ymax) / 2
                             
-                            if int(id_) not in self.tracking_trajectories:
-                                self.tracking_trajectories[int(id_)] = deque(maxlen=10)
+                            if iid not in self.tracking_trajectories:
+                                self.tracking_trajectories[iid] = deque(maxlen=10)
                             
-                            self.tracking_trajectories[int(id_)].append((centroid_x, centroid_y))
-            
+                            self.tracking_trajectories[iid].append((centroid_x, centroid_y))
+
+            # Clean up trajectories for objects that are no longer tracked
+            for id_ in list(self.tracking_trajectories.keys()):
+                if id_ not in current_ids:
+                    del self.tracking_trajectories[id_]
+
             # Draw trajectories
             for id_, trajectory in self.tracking_trajectories.items():
                 for i in range(1, len(trajectory)):

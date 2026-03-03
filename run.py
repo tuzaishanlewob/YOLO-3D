@@ -31,7 +31,7 @@ def main():
     depth_model_size = "small"  # Depth Anything v2 model size: "small", "base", "large"
     
     # Device settings
-    device = 'cpu'  # Force CPU for stability
+    device = 'gpu'  # Force CPU for stability
     
     # Detection settings
     conf_threshold = 0.25  # Confidence threshold for object detection
@@ -42,6 +42,7 @@ def main():
     enable_tracking = True  # Enable object tracking
     enable_bev = True  # Enable Bird's Eye View visualization
     enable_pseudo_3d = True  # Enable pseudo-3D visualization
+    enable_stream = False  # Use streaming mode for detector to lower memory usage
     
     # Camera parameters - simplified approach
     camera_params_file = None  # Path to camera parameters file (None to use default parameters)
@@ -114,7 +115,7 @@ def main():
         fps = 30
     
     # Initialize video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter.fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
     # Initialize variables for FPS calculation
@@ -146,7 +147,11 @@ def main():
             
             # Step 1: Object Detection
             try:
-                detection_frame, detections = detector.detect(detection_frame, track=enable_tracking)
+                detection_frame, detections = detector.detect(
+                    detection_frame,
+                    track=enable_tracking,
+                    stream=enable_stream
+                )
             except Exception as e:
                 print(f"Error during object detection: {e}")
                 detections = []
