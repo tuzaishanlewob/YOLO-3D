@@ -92,12 +92,17 @@ def main():
 
     # Load and apply camera extrinsics/intrinsics if a file was provided
     params = None
-    world_transform = None  # will hold (R,t) if available
+    world_transform = None  # will hold (R, camera_center) if available
     if camera_params_file is not None:
         params = load_camera_params(camera_params_file)
         bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
-        if params is not None and 'R' in params and 't' in params:
-            world_transform = (params['R'], params['t'])
+        if params is not None and 'R' in params:
+            R = params['R']
+            if 'camera_center' in params:
+                world_transform = (R, params['camera_center'])
+            elif 't' in params:
+                # if only t (camera coords) provided, no world transform available
+                world_transform = None
     
     # Initialize Bird's Eye View if enabled
     if enable_bev:
@@ -212,12 +217,13 @@ def main():
                     pt2 = np.array([cx, cy, 1.0])
                     location_cam = np.linalg.inv(bbox3d_estimator.K) @ pt2 * distance
                     
-                    # Optionally convert to world frame if an extrinsic transform is available
+                    # Optionally convert to world frame if a camera center transform is available
                     location_world = None
                     if world_transform is not None:
-                        R, t = world_transform
-                        # t shape (3,1) so squeeze
-                        location_world = R.T @ (location_cam - t.squeeze())
+                        R, cam_center = world_transform
+                        # cam_center is world co-ordinates of camera; formula is
+                        # X_w = R^T * X_c + C
+                        location_world = R.T @ location_cam + cam_center.squeeze()
                     
                     # Create a simplified 3D box representation
                     box_3d = {

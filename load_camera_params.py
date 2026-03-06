@@ -27,12 +27,28 @@ def load_camera_params(params_file):
         params['dist_coeffs'] = np.array(params.get('dist_coeffs', []))
         
         # if rotation/translation given, build projection_matrix from them and store R,t
-        if 'rotation_matrix' in params and 'translation_vector' in params:
+        if 'rotation_matrix' in params:
             R = np.array(params['rotation_matrix'])
-            t = np.array(params['translation_vector']).reshape(3, 1)
-            params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t)
             params['R'] = R
-            params['t'] = t
+            # handle two possible translation conventions
+            if 'translation_vector' in params:
+                # translation expressed in camera coordinates (world origin in camera frame)
+                t_cam = np.array(params['translation_vector']).reshape(3, 1)
+                params['t'] = t_cam
+                params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t_cam)
+            elif 'camera_center' in params:
+                # camera center expressed in world coordinates
+                center = np.array(params['camera_center']).reshape(3, 1)
+                params['camera_center'] = center
+                # convert to camera translation: t = -R * C
+                t_cam = -R @ center
+                params['t'] = t_cam
+                params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t_cam)
+            else:
+                # no translation provided, assume zero
+                t_cam = np.zeros((3, 1))
+                params['t'] = t_cam
+                params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t_cam)
         elif 'projection_matrix' in params:
             params['projection_matrix'] = np.array(params['projection_matrix'])
             # extract R,t from P if possible
