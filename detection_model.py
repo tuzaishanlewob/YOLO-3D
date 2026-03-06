@@ -9,7 +9,7 @@ class ObjectDetector:
     """
     Object detection using YOLOv11 from Ultralytics
     """
-    def __init__(self, model_size='small', conf_thres=0.25, iou_thres=0.45, classes=None, device=None):
+    def __init__(self, model_size='small', conf_thres=0.25, iou_thres=0.45, classes=None, device=None, weights_path=None):
         """
         Initialize the object detector
         
@@ -19,6 +19,9 @@ class ObjectDetector:
             iou_thres (float): IoU threshold for NMS
             classes (list): List of classes to detect (None for all classes)
             device (str): Device to run inference on ('cuda', 'cpu', 'mps')
+            weights_path (str): Optional path to custom weights (.pt) or a model identifier
+                when provided this will be passed directly to YOLO() instead of using the
+                built-in model map. This allows loading personal/trained models.
         """
         # Determine device
         if device is None:
@@ -38,7 +41,7 @@ class ObjectDetector:
         
         print(f"Using device: {self.device} for object detection")
         
-        # Map model size to model name
+        # Map model size to model name (used only when weights_path is not given)
         model_map = {
             'nano': 'yolo11n',
             'small': 'yolo11s',
@@ -47,16 +50,24 @@ class ObjectDetector:
             'extra': 'yolo11x'
         }
         
-        model_name = model_map.get(model_size.lower(), model_map['small'])
+        # Determine which identifier to pass to YOLO()
+        if weights_path:
+            model_source = weights_path
+            print(f"Using custom weights: {weights_path}")
+        else:
+            model_source = model_map.get(model_size.lower(), model_map['small'])
+            print(f"Using pretrained model {model_source}")
         
         # Load model
         try:
-            self.model = YOLO(model_name)
-            print(f"Loaded YOLOv11 {model_size} model on {self.device}")
+            self.model = YOLO(model_source)
+            print(f"Loaded YOLOv11 from '{model_source}' on {self.device}")
         except Exception as e:
-            print(f"Error loading model: {e}")
-            print("Trying to load with default settings...")
-            self.model = YOLO(model_name)
+            print(f"Error loading model '{model_source}': {e}")
+            print("Trying to load with default model size instead...")
+            default = model_map.get(model_size.lower(), model_map['small'])
+            self.model = YOLO(default)
+            print(f"Loaded YOLOv11 {model_size} model on {self.device}")
         
         # Set model parameters
         self.model.overrides['conf'] = conf_thres

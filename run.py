@@ -28,10 +28,11 @@ def main():
     
     # Model settings
     yolo_model_size = "nano"  # YOLOv11 model size: "nano", "small", "medium", "large", "extra"
+    yolo_weights = None         # Path to your custom .pt file or model ID (None to use pretrained size above)
     depth_model_size = "small"  # Depth Anything v2 model size: "small", "base", "large"
     
     # Device settings
-    device = 'gpu'  # Force CPU for stability
+    device = 0  # Force CPU for stability
     
     # Detection settings
     conf_threshold = 0.25  # Confidence threshold for object detection
@@ -42,10 +43,10 @@ def main():
     enable_tracking = True  # Enable object tracking
     enable_bev = True  # Enable Bird's Eye View visualization
     enable_pseudo_3d = True  # Enable pseudo-3D visualization
-    enable_stream = False  # Use streaming mode for detector to lower memory usage
+    enable_stream = True  # Use streaming mode for detector to lower memory usage
     
     # Camera parameters - simplified approach
-    camera_params_file = None  # Path to camera parameters file (None to use default parameters)
+    camera_params_file = "cam.json"  # Path to camera parameters file (None to use default parameters)
     # ===============================================
     
     print(f"Using device: {device}")
@@ -58,7 +59,8 @@ def main():
             conf_thres=conf_threshold,
             iou_thres=iou_threshold,
             classes=classes,
-            device=device
+            device=device,
+            weights_path=yolo_weights
         )
     except Exception as e:
         print(f"Error initializing object detector: {e}")
@@ -87,6 +89,15 @@ def main():
     # Initialize 3D bounding box estimator with default parameters
     # Simplified approach - focus on 2D detection with depth information
     bbox3d_estimator = BBox3DEstimator()
+
+    # Load and apply camera extrinsics/intrinsics if a file was provided
+    params = None
+    world_transform = None  # will hold (R,t) if available
+    if camera_params_file is not None:
+        params = load_camera_params(camera_params_file)
+        bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
+        if params is not None and 'R' in params and 't' in params:
+            world_transform = (params['R'], params['t'])
     
     # Initialize Bird's Eye View if enabled
     if enable_bev:
@@ -194,6 +205,20 @@ def main():
                         depth_value = depth_estimator.get_depth_in_region(depth_map, bbox, method='median')
                         depth_method = 'median'
                     
+                    # Calculate camera-coordinate location of object centre
+                    cx = (bbox[0] + bbox[2]) / 2
+                    cy = (bbox[1] + bbox[3]) / 2
+                    distance = 1.0 + depth_value * 9.0  # replicate estimator mapping
+                    pt2 = np.array([cx, cy, 1.0])
+                    location_cam = np.linalg.inv(bbox3d_estimator.K) @ pt2 * distance
+                    
+                    # Optionally convert to world frame if an extrinsic transform is available
+                    location_world = None
+                    if world_transform is not None:
+                        R, t = world_transform
+                        # t shape (3,1) so squeeze
+                        location_world = R.T @ (location_cam - t.squeeze())
+                    
                     # Create a simplified 3D box representation
                     box_3d = {
                         'bbox_2d': bbox,
@@ -201,10 +226,16 @@ def main():
                         'depth_method': depth_method,
                         'class_name': class_name,
                         'object_id': obj_id,
-                        'score': score
+                        'score': score,
+                        'location_cam': location_cam,
+                        'location_world': location_world
                     }
                     
                     boxes_3d.append(box_3d)
+                    
+                    # log world coordinates if computed
+                    if box_3d.get('location_world') is not None:
+                        print(f"Object {class_name} id={obj_id} world coord: {box_3d['location_world']}")
                     
                     # Keep track of active IDs for tracker cleanup
                     if obj_id is not None:

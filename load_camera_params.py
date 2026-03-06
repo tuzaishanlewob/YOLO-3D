@@ -24,8 +24,29 @@ def load_camera_params(params_file):
         
         # Convert lists to numpy arrays
         params['camera_matrix'] = np.array(params['camera_matrix'])
-        params['dist_coeffs'] = np.array(params['dist_coeffs'])
-        params['projection_matrix'] = np.array(params['projection_matrix'])
+        params['dist_coeffs'] = np.array(params.get('dist_coeffs', []))
+        
+        # if rotation/translation given, build projection_matrix from them and store R,t
+        if 'rotation_matrix' in params and 'translation_vector' in params:
+            R = np.array(params['rotation_matrix'])
+            t = np.array(params['translation_vector']).reshape(3, 1)
+            params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t)
+            params['R'] = R
+            params['t'] = t
+        elif 'projection_matrix' in params:
+            params['projection_matrix'] = np.array(params['projection_matrix'])
+            # extract R,t from P if possible
+            try:
+                # since P = K [R|t], recover [R|t] = K^{-1} P
+                K_inv = np.linalg.inv(params['camera_matrix'])
+                RT = K_inv @ params['projection_matrix']
+                params['R'] = RT[:, :3]
+                params['t'] = RT[:, 3:].reshape(3, 1)
+            except Exception:
+                pass
+        else:
+            # fall back to intrinsics only
+            params['projection_matrix'] = create_projection_matrix(params['camera_matrix'])
         
         print(f"Loaded camera parameters from {params_file}")
         print(f"Camera matrix:\n{params['camera_matrix']}")
