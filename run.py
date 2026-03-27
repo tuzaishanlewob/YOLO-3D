@@ -1,21 +1,29 @@
-#!/usr/bin/env python3
 import os
+import setup_path 
 import sys
 import time
+import math
 import cv2
 import numpy as np
 import torch
 from pathlib import Path
+
+try:
+    import cosysairsim as airsim  # type: ignore
+    from cosysairsim import utils as airsim_utils  # type: ignore
+except ImportError:
+    airsim = None
+    airsim_utils = None
 
 # Set MPS fallback for operations not supported on Apple Silicon
 if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 # Import our modules
-from detection_model import ObjectDetector
-from depth_model import DepthEstimator
-from bbox3d_utils import BBox3DEstimator, BirdEyeView
-from load_camera_params import load_camera_params, apply_camera_params_to_estimator
+from detection_model import ObjectDetector # type: ignore
+from depth_model import DepthEstimator # type: ignore
+from bbox3d_utils import BBox3DEstimator, BirdEyeView # type: ignore
+from load_camera_params import load_camera_params, apply_camera_params_to_estimator # type: ignore
 
 def main():
     """Main function."""
@@ -25,17 +33,21 @@ def main():
     # Input/Output
     source = 0  # Path to input video file or webcam index (0 for default camera)
     output_path = "output.mp4"  # Path to output video file
+    use_airsim_source = True  # If True, pull frames from AirSim instead of OpenCV VideoCapture
+    airsim_camera_name = "0"  # AirSim camera name/id
+    airsim_vehicle_name = ""  # AirSim vehicle name (empty for default)
+    airsim_refresh_camera_params_every_frame = False  # Update intrinsics/extrinsics from AirSim each frame
     
     # Model settings
     yolo_model_size = "nano"  # YOLOv11 model size: "nano", "small", "medium", "large", "extra"
-    yolo_weights = None         # Path to your custom .pt file or model ID (None to use pretrained size above)
+    yolo_weights = r"E:\Programs\AirSim\Cosys-AirSim\runs\detect\train9\weights\best.pt"         # Path to your custom .pt file or model ID (None to use pretrained size above)
     depth_model_size = "small"  # Depth Anything v2 model size: "small", "base", "large"
     
     # Device settings
     device = 0  # Force CPU for stability
     
     # Detection settings
-    conf_threshold = 0.25  # Confidence threshold for object detection
+    conf_threshold = 0.5  # Confidence threshold for object detection
     iou_threshold = 0.45  # IoU threshold for NMS
     classes = None  # Filter by class, e.g., [0, 1, 2] for specific classes, None for all classes
     
@@ -47,9 +59,70 @@ def main():
     
     # Camera parameters - simplified approach
     camera_params_file = "cam.json"  # Path to camera parameters file (None to use default parameters)
+    use_airsim_camera_info = True  # In AirSim mode, derive K/P/R/t from simGetCameraInfo instead of cam.json
     # ===============================================
     
     print(f"Using device: {device}")
+
+    def get_airsim_scene_frame(client, camera_name, vehicle_name=""):
+        """Fetch one RGB scene frame from AirSim and decode it to BGR."""
+        responses = client.simGetImages([
+            airsim.ImageRequest(camera_name, airsim.ImageType.Scene, False, True)
+        ], vehicle_name)
+
+        if not responses:
+            return None
+
+        response = responses[0]
+        if response is None or not response.image_data_uint8:
+            return None
+
+        frame_buffer = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
+        if frame_buffer.size == 0:
+            return None
+
+        return cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+
+    def build_camera_params_from_airsim(camera_info, image_width, image_height):
+        """Build camera params dict from AirSim camera info for estimator compatibility."""
+        hfov = math.radians(camera_info.fov)
+        aspect = image_width / image_height
+        vfov = 2 * math.atan(math.tan(hfov / 2) / aspect)
+
+        fx = image_width / (2 * math.tan(hfov / 2))
+        fy = image_height / (2 * math.tan(vfov / 2))
+        cx = image_width * 0.5
+        cy = image_height * 0.5
+
+        camera_matrix = np.array([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=float)
+
+        # AirSim pose provides camera pose in world frame.
+        # R_cw maps camera -> world. Convert to world->camera for projection matrix.
+        R_cw = airsim_utils.rotation_matrix_from_quat(camera_info.pose.orientation)
+        R_wc = R_cw.T
+
+        camera_center = np.array([
+            camera_info.pose.position.x_val,
+            camera_info.pose.position.y_val,
+            camera_info.pose.position.z_val
+        ], dtype=float).reshape(3, 1)
+
+        t = -R_wc @ camera_center
+        projection_matrix = camera_matrix @ np.hstack((R_wc, t))
+
+        return {
+            'camera_matrix': camera_matrix,
+            'projection_matrix': projection_matrix,
+            'R': R_wc,
+            't': t,
+            'camera_center': camera_center,
+            'R_cam_to_world': R_cw,
+            'convention': 'camera_to_world'
+        }
     
     # Initialize models
     print("Initializing models...")
@@ -92,14 +165,18 @@ def main():
 
     # Load and apply camera extrinsics/intrinsics if a file was provided
     params = None
-    world_transform = None  # will hold (R, camera_center) if available
-    if camera_params_file is not None:
+    world_transform = None  # dict with R + camera_center + convention when available
+    if not use_airsim_source and camera_params_file is not None:
         params = load_camera_params(camera_params_file)
         bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
         if params is not None and 'R' in params:
             R = params['R']
             if 'camera_center' in params:
-                world_transform = (R, params['camera_center'])
+                world_transform = {
+                    'R': R,
+                    'camera_center': params['camera_center'],
+                    'convention': 'world_to_camera'
+                }
             elif 't' in params:
                 # if only t (camera coords) provided, no world transform available
                 world_transform = None
@@ -109,26 +186,67 @@ def main():
         # Use a scale that works well for the 1-5 meter range
         bev = BirdEyeView(scale=60, size=(300, 300))  # Increased scale to spread objects out
     
-    # Open video source
-    try:
-        if isinstance(source, str) and source.isdigit():
-            source = int(source)  # Convert string number to integer for webcam
-    except ValueError:
-        pass  # Keep as string (for video file)
-    
-    print(f"Opening video source: {source}")
-    cap = cv2.VideoCapture(source)
-    
-    if not cap.isOpened():
-        print(f"Error: Could not open video source {source}")
-        return
-    
-    # Get video properties
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    if fps == 0:  # Sometimes happens with webcams
+    cap = None
+    airsim_client = None
+
+    # Open input source (AirSim or OpenCV source)
+    if use_airsim_source:
+        if airsim is None:
+            print("Error: cosysairsim module is not available. Set use_airsim_source=False or install cosysairsim.")
+            return
+
+        print("Connecting to AirSim...")
+        try:
+            airsim_client = airsim.VehicleClient()
+            airsim_client.confirmConnection()
+        except Exception as e:
+            print(f"Error: Could not connect to AirSim: {e}")
+            return
+
+        print(f"Connected to AirSim. Camera: {airsim_camera_name}, Vehicle: '{airsim_vehicle_name}'")
+        first_frame = get_airsim_scene_frame(airsim_client, airsim_camera_name, airsim_vehicle_name)
+        if first_frame is None:
+            print("Error: Could not retrieve initial scene frame from AirSim")
+            return
+
+        height, width = first_frame.shape[:2]
         fps = 30
+
+        if use_airsim_camera_info:
+            try:
+                camera_info = airsim_client.simGetCameraInfo(airsim_camera_name, airsim_vehicle_name)
+                params = build_camera_params_from_airsim(camera_info, width, height)
+                bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
+                world_transform = {
+                    'R': params['R_cam_to_world'],
+                    'camera_center': params['camera_center'],
+                    'convention': 'camera_to_world'
+                }
+                print("Applied dynamic camera parameters from AirSim camera info")
+            except Exception as e:
+                print(f"Warning: Failed to read AirSim camera info. Using estimator defaults: {e}")
+    else:
+        try:
+            if isinstance(source, str) and source.isdigit():
+                source = int(source)  # Convert string number to integer for webcam
+        except ValueError:
+            pass  # Keep as string (for video file)
+
+        print(f"Opening video source: {source}")
+        cap = cv2.VideoCapture(source)
+
+        if not cap.isOpened():
+            print(f"Error: Could not open video source {source}")
+            return
+
+        # Get video properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        if fps == 0:  # Sometimes happens with webcams
+            fps = 30
+
+        first_frame = None
     
     # Initialize video writer
     fourcc = cv2.VideoWriter.fourcc(*'mp4v')
@@ -150,10 +268,33 @@ def main():
             break
             
         try:
-            # Read frame
-            ret, frame = cap.read()
-            if not ret:
-                break
+            # Read frame from selected source
+            if first_frame is not None:
+                frame = first_frame
+                first_frame = None
+            elif use_airsim_source:
+                frame = get_airsim_scene_frame(airsim_client, airsim_camera_name, airsim_vehicle_name)
+                if frame is None:
+                    print("Warning: Empty frame from AirSim, skipping")
+                    continue
+
+                if use_airsim_camera_info and airsim_refresh_camera_params_every_frame:
+                    try:
+                        h_frame, w_frame = frame.shape[:2]
+                        camera_info = airsim_client.simGetCameraInfo(airsim_camera_name, airsim_vehicle_name)
+                        params = build_camera_params_from_airsim(camera_info, w_frame, h_frame)
+                        bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
+                        world_transform = {
+                            'R': params['R_cam_to_world'],
+                            'camera_center': params['camera_center'],
+                            'convention': 'camera_to_world'
+                        }
+                    except Exception as e:
+                        print(f"Warning: Could not refresh AirSim camera params this frame: {e}")
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    break
             
             # Make copies for different visualizations
             original_frame = frame.copy()
@@ -220,10 +361,15 @@ def main():
                     # Optionally convert to world frame if a camera center transform is available
                     location_world = None
                     if world_transform is not None:
-                        R, cam_center = world_transform
-                        # cam_center is world co-ordinates of camera; formula is
-                        # X_w = R^T * X_c + C
-                        location_world = R.T @ location_cam + cam_center.squeeze()
+                        R = world_transform['R']
+                        cam_center = world_transform['camera_center']
+                        convention = world_transform.get('convention', 'world_to_camera')
+
+                        if convention == 'camera_to_world':
+                            location_world = R @ location_cam + cam_center.squeeze()
+                        else:
+                            # For world->camera extrinsics, X_w = R^T * X_c + C
+                            location_world = R.T @ location_cam + cam_center.squeeze()
                     
                     # Create a simplified 3D box representation
                     box_3d = {
@@ -360,7 +506,8 @@ def main():
     
     # Clean up
     print("Cleaning up resources...")
-    cap.release()
+    if cap is not None:
+        cap.release()
     out.release()
     cv2.destroyAllWindows()
     

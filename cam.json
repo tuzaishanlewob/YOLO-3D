@@ -1,5 +1,5 @@
 {
   "camera_matrix": [],
   "rotation_matrix": [],
-  "camera_center": []         // camera location in world frame
+  "camera_center": []         
 }

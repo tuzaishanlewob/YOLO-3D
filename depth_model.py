@@ -46,10 +46,12 @@ class DepthEstimator:
         model_map = {
             'small': 'depth-anything/Depth-Anything-V2-Small-hf',
             'base': 'depth-anything/Depth-Anything-V2-Base-hf',
-            'large': 'depth-anything/Depth-Anything-V2-Large-hf'
+            'large': 'depth-anything/Depth-Anything-V2-Large-hf',
+            'indoor': 'depth-anything/Depth-Anything-V2-Metric-Hypersim-Small',
+            'outdoor': 'depth-anything/Depth-Anything-V2-Metric-VKITTI-Small'
         }
         
-        model_name = model_map.get(model_size.lower(), model_map['small'])
+        model_name = model_map.get(model_size.lower(), model_map['outdoor'])
         
         # Create pipeline
         try:
