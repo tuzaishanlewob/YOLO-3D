@@ -116,9 +116,15 @@ class BBox3DEstimator:
             dimensions[1] = dimensions[0] * 0.3  # width
             dimensions[2] = dimensions[0] * 0.3  # length
         
-        # Convert depth to distance - use a larger range for better visualization
-        # Map depth_value (0-1) to a range of 1-10 meters
-        distance = 1.0 + depth_value * 9.0  # Increased from 4.0 to 9.0 for a larger range
+        # Convert depth to distance
+        # Check if this is metric depth or normalized depth based on value range
+        # Metric depth (from DepthPlanar, Depth Anything metric models) is in meters
+        # Normalized depth is 0-1
+        if depth_value > 1.5:  # Likely metric depth (meters)
+            distance = depth_value  # Use directly as it's already in meters
+        else:
+            # Normalized depth (0-1) - map to 1-10 meter range for visualization
+            distance = 1.0 + depth_value * 9.0
         
         # Calculate 3D location
         location = self._backproject_point(center_x, center_y, distance)
@@ -467,6 +473,16 @@ class BBox3DEstimator:
         
         # Get depth value for scaling
         depth_value = box_3d.get('depth_value', 0.5)
+        depth_unit = box_3d.get('depth_unit', 'norm')  # 'norm' for normalized, 'm' for metric
+        
+        # Normalize metric depth to 0-1 range for offset calculation
+        # Assume metric depth range: 0.5m (min) to 50m (max typical scene)
+        if depth_unit == 'm':
+            # Metric depth in meters - normalize to 0-1 range
+            normalized_depth = np.clip((depth_value - 0.5) / (50.0 - 0.5), 0, 1)
+        else:
+            # Already normalized
+            normalized_depth = np.clip(depth_value, 0, 1)
         
         # Calculate box dimensions
         width = x2 - x1
@@ -474,7 +490,7 @@ class BBox3DEstimator:
         
         # Calculate the offset for the 3D effect (deeper objects have smaller offset)
         # Inverse relationship with depth - closer objects have larger offset
-        offset_factor = 1.0 - depth_value
+        offset_factor = 1.0 - normalized_depth
         offset_x = int(width * 0.3 * offset_factor)
         offset_y = int(height * 0.3 * offset_factor)
         
@@ -548,7 +564,11 @@ class BBox3DEstimator:
         if 'depth_value' in box_3d:
             depth_value = box_3d['depth_value']
             depth_method = box_3d.get('depth_method', 'unknown')
-            depth_text = f"D:{depth_value:.2f} ({depth_method})"
+            depth_unit = box_3d.get('depth_unit', 'norm')
+            if depth_unit == 'm':
+                depth_text = f"D:{depth_value:.2f}m ({depth_method})"
+            else:
+                depth_text = f"D:{depth_value:.2f} ({depth_method})"
             cv2.putText(image, depth_text, (x1, text_y), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             text_y -= 15
