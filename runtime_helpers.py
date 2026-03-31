@@ -40,7 +40,7 @@ def get_airsim_scene_and_depth(client, camera_name, vehicle_name, airsim_module)
     """Fetch synchronized scene and DepthPlanar frames from AirSim."""
     responses = client.simGetImages([
         airsim_module.ImageRequest(camera_name, airsim_module.ImageType.Scene, False, True),
-        airsim_module.ImageRequest(camera_name, airsim_module.ImageType.DepthPlanar, True),
+        airsim_module.ImageRequest(camera_name, airsim_module.ImageType.DepthPlanar, True, False),
     ], vehicle_name)
 
     if not responses or len(responses) < 2:
@@ -61,6 +61,7 @@ def get_airsim_scene_and_depth(client, camera_name, vehicle_name, airsim_module)
         depth_resp.width,
         depth_resp.height,
     )
+    depth_map = np.asarray(depth_map, dtype=np.float32)
     return frame, depth_map
 
 

@@ -4,7 +4,6 @@ def get_default_config():
         # UI/runtime controls
         "show_config_ui": True,
         "integrated_preview_ui": True,
-        "show_cv2_windows": False,
 
         # Input/Output
         "source": "0",
@@ -19,7 +18,11 @@ def get_default_config():
         "gt_detection_mesh_pattern": "Cylinder*",
         "gt_detection_radius_m": 200.0,
         "gt_use_depthplanar": True,
-        "compare_three_versions": True,
+        "enable_v1": True,
+        "enable_v2": True,
+        "enable_v3": True,
+        "enable_v4": False,
+        "compare_three_versions": True,  # Legacy alias for V3
 
         # Model settings
         "yolo_model_size": "nano",
@@ -38,6 +41,18 @@ def get_default_config():
         "enable_bev": True,
         "enable_pseudo_3d": True,
         "enable_stream": True,
+
+        # Segmentation (Phase 2)
+        "enable_segmentation": True,
+        "compare_four_versions": False,  # Legacy alias for V4
+
+        # Dataset export (Phase 2)
+        "export_dataset": False,
+        "dataset_root": "dataset",
+        "hdf5_include_segmentation": True,
+        "dataset_split_train": 0.7,
+        "dataset_split_val": 0.15,
+        "dataset_split_test": 0.15,
 
         # Camera parameters
         "camera_params_file": "cam.json",
