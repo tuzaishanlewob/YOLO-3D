@@ -18,7 +18,7 @@ if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backe
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 # Import our modules
-from detection_model import ObjectDetector # type: ignore
+from detection_model import ObjectDetector #type: ignore
 from depth_model import DepthEstimator # type: ignore
 from bbox3d_utils import BBox3DEstimator, BirdEyeView # type: ignore
 from load_camera_params import load_camera_params, apply_camera_params_to_estimator # type: ignore
