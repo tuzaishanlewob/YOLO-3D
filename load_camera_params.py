@@ -2,6 +2,7 @@
 import os
 import json
 import numpy as np
+import math
 from pathlib import Path
 
 def load_camera_params(params_file):
@@ -28,6 +29,7 @@ def load_camera_params(params_file):
         
         # if rotation/translation given, build projection_matrix from them and store R,t
         if 'rotation_matrix' in params:
+            # R is rotation matrix that transform world coordinates to camera coordinates, note as R_{wc}
             R = np.array(params['rotation_matrix'])
             params['R'] = R
             # handle two possible translation conventions
@@ -35,6 +37,7 @@ def load_camera_params(params_file):
                 # translation expressed in camera coordinates (world origin in camera frame)
                 t_cam = np.array(params['translation_vector']).reshape(3, 1)
                 params['t'] = t_cam
+                # P_c = R_{wc}P_w + T = K@np.vstack((P_w,1)), K is the projection matrix
                 params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t_cam)
             elif 'camera_center' in params:
                 # camera center expressed in world coordinates
@@ -43,6 +46,7 @@ def load_camera_params(params_file):
                 # convert to camera translation: t = -R * C
                 t_cam = -R @ center
                 params['t'] = t_cam
+                # P_c = R_{wc}(P_w-T)=R_{wc}P_w - R_{wc}T=K@np.vstack((P_w,1))
                 params['projection_matrix'] = create_projection_matrix(params['camera_matrix'], R, t_cam)
             else:
                 # no translation provided, assume zero
@@ -74,6 +78,48 @@ def load_camera_params(params_file):
         print(f"Error loading camera parameters: {e}")
         return None
 
+def build_camera_params_from_airsim(camera_info, image_width, image_height, airsim_utils_module):
+    hfov = math.radians(camera_info.fov)
+    aspect = image_width / image_height
+    vfov = 2 * math.atan(math.tan(hfov / 2) / aspect)
+
+    fx = image_width / (2 * math.tan(hfov / 2))
+    fy = image_height / (2 * math.tan(vfov / 2))
+    cx = image_width * 0.5
+    cy = image_height * 0.5
+
+    camera_matrix = np.array(
+        [
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+    r_cam_to_world = airsim_utils_module.rotation_matrix_from_quat(camera_info.pose.orientation)
+    r_world_to_cam = r_cam_to_world.T
+    camera_center = np.array(
+        [
+            camera_info.pose.position.x_val,
+            camera_info.pose.position.y_val,
+            camera_info.pose.position.z_val,
+        ],
+        dtype=float,
+    ).reshape(3, 1)
+    t = -r_world_to_cam @ camera_center
+    projection_matrix = camera_matrix @ np.hstack((r_world_to_cam, t))
+
+    return {
+        "camera_matrix": camera_matrix,
+        "projection_matrix": projection_matrix,
+        "R": r_world_to_cam,
+        "t": t,
+        "camera_center": camera_center,
+        "R_cam_to_world": r_cam_to_world,
+        "convention": "camera_to_world",
+    }
+
 def create_projection_matrix(camera_matrix, R=None, t=None):
     """
     Create a projection matrix from camera intrinsic and extrinsic parameters.
@@ -92,7 +138,7 @@ def create_projection_matrix(camera_matrix, R=None, t=None):
     if t is None:
         t = np.zeros((3, 1))
     
-    # Combine rotation and translation
+    # Combine rotation and translation, hstack receives sequence(a tuple)
     RT = np.hstack((R, t))
     
     # Create projection matrix

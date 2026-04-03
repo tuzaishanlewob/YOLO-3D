@@ -7,17 +7,35 @@ import cv2
 from transformers import pipeline
 from PIL import Image
 
+# Optional local raw-weights model support.
+# Expects a local implementation such as:
+#   from depth_anything_v2.dpt import DepthAnythingV2
+try:
+    from depth_anything_v2.dpt import DepthAnythingV2#type:ignore
+except Exception:
+    DepthAnythingV2 = None
+
+
 class DepthEstimator:
     """
-    Depth estimation using Depth Anything v2
+    Depth estimation or extraction
+
+    Supports:
+    - Hugging Face pipeline models (default)
+    - Raw .pth/.pt checkpoints via local DepthAnythingV2 class
     """
-    def __init__(self, model_size='small', device=None, skip_model_init=False):
+
+    def __init__(self, model_size='outdoor', device=None, skip_model_init=False, weights_path=None):
         """
         Initialize the depth estimator
-        
+
         Args:
-            model_size (str): Model size ('small', 'base', 'large')
+            model_size (str): Model size ('small', 'base', 'large', 'indoor', 'outdoor')
             device (str): Device to run inference on ('cuda', 'cpu', 'mps')
+            skip_model_init (bool): If True, skip model/pipeline init (external depth source mode)
+            weights_path (str|None): Optional custom model path.
+                - If endswith .pth/.pt => load raw checkpoint into local DepthAnythingV2.
+                - Else => used as HF model id/path for transformers pipeline.
         """
         # Determine device
         if device is None:
@@ -27,9 +45,13 @@ class DepthEstimator:
                 device = 'mps'
             else:
                 device = 'cpu'
-        
+
         self.device = device
-        
+        self.weights_path = weights_path
+        self.pipe = None
+        self.raw_model = None
+        self.use_raw_model = False
+
         # Set MPS fallback for operations not supported on Apple Silicon
         if self.device == 'mps':
             print("Using MPS device with CPU fallback for unsupported operations")
@@ -39,9 +61,9 @@ class DepthEstimator:
             print("Forcing CPU for depth estimation pipeline due to MPS compatibility issues")
         else:
             self.pipe_device = self.device
-        
+
         print(f"Using device: {self.device} for depth estimation (pipeline on {self.pipe_device})")
-        
+
         # Map model size to model name
         model_map = {
             'small': 'depth-anything/Depth-Anything-V2-Small-hf',
@@ -50,24 +72,23 @@ class DepthEstimator:
             'indoor': 'depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf',
             'outdoor': 'depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf'
         }
-        
-        model_name = model_map.get(model_size.lower(), model_map['small'])
+
         self.model_size = str(model_size).lower()
         self.is_metric_depth = self.model_size in ('indoor', 'outdoor')
-        
-        self.pipe = None
+
+
+        encoder = 'vits' # or 'vits', 'vitb'
+        dataset = 'hypersim' # 'hypersim' for indoor model, 'vkitti' for outdoor model
+        max_depth = 200 # 20 for indoor model, 80 for outdoor model
+
         if not skip_model_init:
-            # Create pipeline
-            try:
-                self.pipe = pipeline(task="depth-estimation", model=model_name, device=self.pipe_device)
-                print(f"Loaded Depth Anything v2 {model_size} model on {self.pipe_device}")
-            except Exception as e:
-                # Fallback to CPU if there are issues
-                print(f"Error loading model on {self.pipe_device}: {e}")
-                print("Falling back to CPU for depth estimation")
-                self.pipe_device = 'cpu'
-                self.pipe = pipeline(task="depth-estimation", model=model_name, device=self.pipe_device)
-                print(f"Loaded Depth Anything v2 {model_size} model on CPU (fallback)")
+            # Branch 1: raw .pth/.pt weights
+            if weights_path and str(weights_path).lower().endswith(('.pth', '.pt')):
+                self._init_raw_model(weights_path, model_size)
+            else:
+                # Branch 2: transformers pipeline (default / custom HF path)
+                model_name = weights_path if weights_path else model_map.get(self.model_size, model_map['small'])
+                self._init_pipeline_model(model_name)
         else:
             print("Skipping depth model pipeline initialization (external depth source mode)")
 
@@ -76,6 +97,44 @@ class DepthEstimator:
         self.depth_smoothing_alpha = 0.35
         self.max_missing_frames = 30
         self.frame_counter = 0
+
+    def _init_raw_model(self, weights_path, encoder):
+        """Initialize local model from raw .pth/.pt checkpoint."""
+        if DepthAnythingV2 is None:
+            raise ImportError(
+                "Raw .pth/.pt loading requested, but DepthAnythingV2 is not importable. "
+                "Make sure local code exists and is importable as "
+                "`from depth_anything_v2.dpt import DepthAnythingV2`."
+            )
+        model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]}
+        }
+        max_depth = 80
+        print(f"Loading raw checkpoint: {weights_path} (encoder={encoder})")
+        model = DepthAnythingV2(**{**model_configs[encoder], 'max_depth': max_depth})
+        model.load_state_dict(torch.load(weights_path, map_location='cpu'))
+        model.eval()
+        model = model.to(self.device)
+        model.eval()
+
+        self.raw_model = model
+        self.use_raw_model = True
+        print(f"Loaded raw depth model on {self.device}")
+
+    def _init_pipeline_model(self, model_name):
+        """Initialize Hugging Face depth-estimation pipeline."""
+        try:
+            self.pipe = pipeline(task="depth-estimation", model=model_name, device=self.pipe_device)
+            print(f"Loaded Depth Anything v2 model ({model_name}) on {self.pipe_device}")
+        except Exception as e:
+            # Fallback to CPU if there are issues
+            print(f"Error loading model on {self.pipe_device}: {e}")
+            print("Falling back to CPU for depth estimation")
+            self.pipe_device = 'cpu'
+            self.pipe = pipeline(task="depth-estimation", model=model_name, device=self.pipe_device)
+            print(f"Loaded Depth Anything v2 model ({model_name}) on CPU (fallback)")
 
     def _clip_bbox(self, bbox, shape):
         """Clip bbox to image bounds and return integer coordinates."""
@@ -147,13 +206,39 @@ class DepthEstimator:
         for obj_id in stale_ids:
             del self.depth_history[obj_id]
 
-    def estimate_object_depth(self, depth_map, bbox, class_name='', object_id=None):
+    def estimate_object_depth(self, depth_map, bbox, class_name='', object_id=None, center_x=None, center_y=None):
+        # To-do: what is the use of class name? no use. delete it
         """
-        Estimate object depth robustly from a detection bbox.
+        Estimate object depth robustly from a detection bbox or specific point.
+
+        Args:
+            depth_map (np.ndarray): Depth map array.
+            bbox (list/tuple): [x1, y1, x2, y2] bounding box.
+            class_name (str): Object class name for percentile tuning.
+            object_id (int|None): Tracking ID for temporal smoothing.
+            center_x (float|None): Optional x-coordinate to sample depth directly.
+            center_y (float|None): Optional y-coordinate to sample depth directly.
+                If both center_x and center_y are provided, depth is taken at that point
+                and bbox-based ROI estimation is skipped.
 
         Returns:
             tuple: (depth_value, method_tag)
         """
+        # If explicit center point is provided, use it directly
+        if center_x is not None and center_y is not None:
+            cx = int(round(center_x))
+            cy = int(round(center_y))
+            depth_value = self.get_depth_at_point(depth_map, cx, cy)
+            if np.isfinite(depth_value) and depth_value > 0:
+                depth_value, smoothed = self._smooth_depth(object_id, depth_value)
+                method = 'point-sample'
+                if smoothed and object_id is not None:
+                    method += '+ema'
+                return float(depth_value), method
+            # Fallback to bbox if point is invalid
+            return 0.0, 'point-invalid'
+
+        # Original bbox-based estimation
         clipped = self._clip_bbox(bbox, depth_map.shape)
         if clipped is None:
             return 0.0, 'invalid-bbox'
@@ -218,36 +303,22 @@ class DepthEstimator:
             depth_method += '+ema'
 
         return float(depth_value), depth_method
-    
-    def estimate_depth(self, image):
-        """
-        Estimate depth from an image
-        
-        Args:
-            image (numpy.ndarray): Input image (BGR format)
-            
-        Returns:
-            numpy.ndarray: Depth map (normalized to 0-1)
-        """
-        if self.pipe is None:
-            raise RuntimeError("Depth estimation pipeline is not initialized. Set skip_model_init=False to use model inference.")
 
-        # Convert BGR to RGB
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Convert to PIL Image
+    def _estimate_depth_pipeline(self, image_rgb):
+        """Inference through transformers pipeline."""
         pil_image = Image.fromarray(image_rgb)
-        
-        # Get depth map
+
         try:
             depth_result = self.pipe(pil_image)
             depth_map = depth_result["depth"]
-            
+
             # Convert PIL Image to numpy array if needed
             if isinstance(depth_map, Image.Image):
                 depth_map = np.array(depth_map)
             elif isinstance(depth_map, torch.Tensor):
                 depth_map = depth_map.cpu().numpy()
+
+            return depth_map
         except RuntimeError as e:
             # Handle potential MPS errors during inference
             if self.device == 'mps':
@@ -257,38 +328,92 @@ class DepthEstimator:
                 cpu_pipe = pipeline(task="depth-estimation", model=self.pipe.model.config._name_or_path, device='cpu')
                 depth_result = cpu_pipe(pil_image)
                 depth_map = depth_result["depth"]
-                
+
                 # Convert PIL Image to numpy array if needed
                 if isinstance(depth_map, Image.Image):
                     depth_map = np.array(depth_map)
                 elif isinstance(depth_map, torch.Tensor):
                     depth_map = depth_map.cpu().numpy()
+                return depth_map
             else:
                 # Re-raise the error if not MPS
                 raise
-        
-        # Normalize depth map to 0-1
-        if not self.is_metric_depth:
-            depth_min = depth_map.min()
-            depth_max = depth_map.max()
-            if depth_max > depth_min:
+
+    def _estimate_depth_raw(self, image_rgb):
+        """Inference through local raw model loaded from .pth/.pt."""
+        # Preferred path for DepthAnythingV2 implementations
+        if hasattr(self.raw_model, "infer_image"):
+            depth = self.raw_model.infer_image(image_rgb)
+            if isinstance(depth, torch.Tensor):
+                depth = depth.detach().cpu().numpy()
+            return depth
+
+        # Generic fallback if infer_image is not available
+        img = image_rgb.astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            out = self.raw_model(img)
+
+        if isinstance(out, (list, tuple)):
+            out = out[0]
+        if isinstance(out, torch.Tensor):
+            out = out.squeeze().detach().cpu().numpy()
+
+        return out
+
+    def estimate_depth(self, image):
+        """
+        Estimate depth from an image
+
+        Args:
+            image (numpy.ndarray): Input image (BGR format)
+
+        Returns:
+            numpy.ndarray: Depth map
+              - normalized to 0-1 for relative models
+              - metric (meters) for metric models ('indoor', 'outdoor') and most raw checkpoints
+        """
+        if self.pipe is None and not self.use_raw_model:
+            raise RuntimeError(
+                "Depth estimator is not initialized. "
+                "Set skip_model_init=False and/or provide valid weights_path."
+            )
+
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Get depth map from selected backend
+        if self.use_raw_model:
+            depth_map = self._estimate_depth_raw(image_rgb)
+        else:
+            depth_map = self._estimate_depth_pipeline(image_rgb)
+
+        depth_map = np.asarray(depth_map, dtype=np.float32)
+
+        # Normalize only for non-metric HF relative depth models.
+        # Raw checkpoints are treated as metric/absolute-like by default (no forced normalization).
+        if (not self.is_metric_depth) and (not self.use_raw_model):
+            depth_min = np.nanmin(depth_map)
+            depth_max = np.nanmax(depth_map)
+            if np.isfinite(depth_min) and np.isfinite(depth_max) and depth_max > depth_min:
                 depth_map = (depth_map - depth_min) / (depth_max - depth_min)
-        
+
         return depth_map
-    
+
     def colorize_depth(self, depth_map, cmap=cv2.COLORMAP_INFERNO):
         """
         Colorize depth map for visualization
-        
+
         Args:
-            depth_map (numpy.ndarray): Depth map (normalized to 0-1)
+            depth_map (numpy.ndarray): Depth map (normalized or metric)
             cmap (int): OpenCV colormap
-            
+
         Returns:
             numpy.ndarray: Colorized depth map (BGR format)
         """
-        # Metric-depth models (indoor/outdoor) output meters; normalize for display only.
-        if self.is_metric_depth or np.nanmax(depth_map) > 1.5:
+        # Metric-depth models (indoor/outdoor/raw) output meters; normalize for display only.
+        if self.is_metric_depth or self.use_raw_model or np.nanmax(depth_map) > 1.5:
             valid = depth_map[np.isfinite(depth_map) & (depth_map > 0)]
             if valid.size == 0:
                 depth_map_uint8 = np.zeros(depth_map.shape, dtype=np.uint8)
@@ -299,58 +424,23 @@ class DepthEstimator:
                 depth_map_uint8 = (disp * 255).astype(np.uint8)
         else:
             depth_map_uint8 = (depth_map * 255).astype(np.uint8)
+
         colored_depth = cv2.applyColorMap(depth_map_uint8, cmap)
         return colored_depth
-    
+
     def get_depth_at_point(self, depth_map, x, y):
         """
         Get depth value at a specific point
-        
+
         Args:
             depth_map (numpy.ndarray): Depth map
             x (int): X coordinate
             y (int): Y coordinate
-            
+
         Returns:
             float: Depth value at (x, y)
         """
         if 0 <= y < depth_map.shape[0] and 0 <= x < depth_map.shape[1]:
             return depth_map[y, x]
         return 0.0
-    
-    def get_depth_in_region(self, depth_map, bbox, method='median'):
-        """
-        Get depth value in a region defined by a bounding box
-        
-        Args:
-            depth_map (numpy.ndarray): Depth map
-            bbox (list): Bounding box [x1, y1, x2, y2]
-            method (str): Method to compute depth ('median', 'mean', 'min')
-            
-        Returns:
-            float: Depth value in the region
-        """
-        x1, y1, x2, y2 = [int(coord) for coord in bbox]
-        
-        # Ensure coordinates are within image bounds
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(depth_map.shape[1] - 1, x2)
-        y2 = min(depth_map.shape[0] - 1, y2)
-        
-        # Extract region
-        region = depth_map[y1:y2, x1:x2]
-        valid_region = self._valid_depth_values(region)
-        
-        if valid_region.size == 0:
-            return 0.0
-        
-        # Compute depth based on method
-        if method == 'median':
-            return float(np.median(valid_region))
-        elif method == 'mean':
-            return float(np.mean(valid_region))
-        elif method == 'min':
-            return float(np.min(valid_region))
-        else:
-            return float(np.median(valid_region))
+

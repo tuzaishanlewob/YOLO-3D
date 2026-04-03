@@ -35,23 +35,30 @@ def estimate_from_depth_map(
     depth_to_distance,
     is_metric,
     method_suffix,
+    center_x=None,
+    center_y=None,
 ):
     """Estimate 3D point from depth map using back-projection and optional world transform."""
     if depth_map is None:
         return None
-
+#To-do: no need for class_name
     depth_value_raw, depth_method_raw = depth_estimator.estimate_object_depth(
         depth_map,
         bbox,
         class_name=class_name,
-        # Keep V2 and V3 independent (no shared EMA state between versions).
         object_id=None,
+        center_x=center_x,
+        center_y=center_y,
     )
 
     distance_m = float(depth_value_raw) if is_metric else float(depth_to_distance(depth_value_raw))
 
-    cx = (bbox[0] + bbox[2]) / 2
-    cy = (bbox[1] + bbox[3]) / 2
+    if center_x is not None and center_y is not None:
+        cx = float(center_x)
+        cy = float(center_y)
+    else:
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
     pt2 = np.array([cx, cy, 1.0], dtype=float)
 
     location_cam_est = np.linalg.inv(camera_matrix) @ pt2 * distance_m
