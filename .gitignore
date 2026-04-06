@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+dataset_airsim
 # Model files
 *.pt
 *.pth

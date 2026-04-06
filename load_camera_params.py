@@ -79,15 +79,16 @@ def load_camera_params(params_file):
         return None
 
 def build_camera_params_from_airsim(camera_info, image_width, image_height, airsim_utils_module):
+    '''
+    In a simulation like AirSim, if the sensor's physical aspect ratio (calculated from Filmback. SensorWidth / Filmback.SensorHeight) does not match
+    the rendering resolution's aspect ratio (image_width / image_height), and the engine is forced to stretch the image to fit instead of cropping/letterboxing, 
+    it results in unequal pixel scaling on the axes.
+    '''
     hfov = math.radians(camera_info.fov)
-    aspect = image_width / image_height
-    vfov = 2 * math.atan(math.tan(hfov / 2) / aspect)
-
     fx = image_width / (2 * math.tan(hfov / 2))
-    fy = image_height / (2 * math.tan(vfov / 2))
+    fy = fx
     cx = image_width * 0.5
     cy = image_height * 0.5
-
     camera_matrix = np.array(
         [
             [fx, 0.0, cx],

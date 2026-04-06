@@ -1,5 +1,8 @@
 import numpy as np
 
+def depth_to_distance(depth_value):
+    """Map normalized relative depth (0-1) to display distance in meters."""
+    return 1.0 + float(depth_value) * 9.0
 
 def optical_to_airsim_camera_frame(point_optical):
     """Convert optical frame [x_right, y_down, z_forward] to AirSim camera frame [x_fwd, y_right, z_down]."""
@@ -32,7 +35,6 @@ def estimate_from_depth_map(
     class_name,
     camera_matrix,
     world_transform,
-    depth_to_distance,
     is_metric,
     method_suffix,
     center_x=None,
