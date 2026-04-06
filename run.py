@@ -1,20 +1,19 @@
 import os
-import sys
 import time
 import cv2
 import numpy as np
 import torch
-from pathlib import Path
 
 # Set MPS fallback for operations not supported on Apple Silicon
 if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 # Import our modules
-from detection_model import ObjectDetector
-from depth_model import DepthEstimator
 from bbox3d_utils import BBox3DEstimator, BirdEyeView
-from load_camera_params import load_camera_params, apply_camera_params_to_estimator
+from camera_module import apply_camera_params_to_estimator
+from camera_module import estimate_from_depth_map
+from camera_module import load_camera_params
+from runtime_common import init_depth_estimator, init_detector
 
 def main():
     """Main function."""
@@ -52,38 +51,15 @@ def main():
     
     # Initialize models
     print("Initializing models...")
-    try:
-        detector = ObjectDetector(
-            model_size=yolo_model_size,
-            conf_thres=conf_threshold,
-            iou_thres=iou_threshold,
-            classes=classes,
-            device=device,
-            weights_path=yolo_weights
-        )
-    except Exception as e:
-        print(f"Error initializing object detector: {e}")
-        print("Falling back to CPU for object detection")
-        detector = ObjectDetector(
-            model_size=yolo_model_size,
-            conf_thres=conf_threshold,
-            iou_thres=iou_threshold,
-            classes=classes,
-            device='cpu'
-        )
-    
-    try:
-        depth_estimator = DepthEstimator(
-            model_size=depth_model_size,
-            device=device
-        )
-    except Exception as e:
-        print(f"Error initializing depth estimator: {e}")
-        print("Falling back to CPU for depth estimation")
-        depth_estimator = DepthEstimator(
-            model_size=depth_model_size,
-            device='cpu'
-        )
+    detector = init_detector(
+        model_size=yolo_model_size,
+        conf_threshold=conf_threshold,
+        iou_threshold=iou_threshold,
+        classes=classes,
+        device=device,
+        weights_path=yolo_weights,
+    )
+    depth_estimator = init_depth_estimator(model_size=depth_model_size, device=device)
     
     # Initialize 3D bounding box estimator with default parameters
     # Simplified approach - focus on 2D detection with depth information
@@ -91,17 +67,17 @@ def main():
 
     # Load and apply camera extrinsics/intrinsics if a file was provided
     params = None
-    world_transform = None  # will hold (R, camera_center) if available
+    world_transform = None
     if camera_params_file is not None:
         params = load_camera_params(camera_params_file)
         bbox3d_estimator = apply_camera_params_to_estimator(bbox3d_estimator, params)
         if params is not None and 'R' in params:
-            R = params['R']
-            if 'camera_center' in params:
-                world_transform = (R, params['camera_center'])
-            elif 't' in params:
-                # if only t (camera coords) provided, no world transform available
-                world_transform = None
+            world_transform = {
+                'R': params['R'],
+                'camera_center': params.get('camera_center'),
+                't': params.get('t'),
+                'convention': params.get('convention', 'world_to_camera'),
+            }
     
     # Initialize Bird's Eye View if enabled
     if enable_bev:
@@ -157,7 +133,6 @@ def main():
             # Make copies for different visualizations
             original_frame = frame.copy()
             detection_frame = frame.copy()
-            depth_frame = frame.copy()
             result_frame = frame.copy()
             
             # Step 1: Object Detection
@@ -196,44 +171,29 @@ def main():
                     # Get class name
                     class_name = detector.get_class_names()[class_id]
                     
-                    # Get depth in the region of the bounding box
-                    # Try different methods for depth estimation
-                    if class_name.lower() in ['person', 'cat', 'dog']:
-                        # For people and animals, use the center point depth
-                        center_x = int((bbox[0] + bbox[2]) / 2)
-                        center_y = int((bbox[1] + bbox[3]) / 2)
-                        depth_value = depth_estimator.get_depth_at_point(depth_map, center_x, center_y)
-                        depth_method = 'center'
-                    else:
-                        # For other objects, use the median depth in the region
-                        depth_value = depth_estimator.get_depth_in_region(depth_map, bbox, method='median')
-                        depth_method = 'median'
-                    
-                    # Calculate camera-coordinate location of object centre
-                    cx = (bbox[0] + bbox[2]) / 2
-                    cy = (bbox[1] + bbox[3]) / 2
-                    distance = 1.0 + depth_value * 9.0  # replicate estimator mapping
-                    pt2 = np.array([cx, cy, 1.0])
-                    location_cam = np.linalg.inv(bbox3d_estimator.K) @ pt2 * distance
-                    
-                    # Optionally convert to world frame if a camera center transform is available
-                    location_world = None
-                    if world_transform is not None:
-                        R, cam_center = world_transform
-                        # cam_center is world co-ordinates of camera; formula is
-                        # X_w = R^T * X_c + C
-                        location_world = R.T @ location_cam + cam_center.squeeze()
+                    estimate = estimate_from_depth_map(
+                        depth_estimator=depth_estimator,
+                        depth_map=depth_map,
+                        bbox=bbox,
+                        class_name=class_name,
+                        camera_matrix=bbox3d_estimator.K,
+                        world_transform=world_transform,
+                        is_metric=bool(getattr(depth_estimator, "is_metric_depth", False) or getattr(depth_estimator, "use_raw_model", False)),
+                        method_suffix="video-linalg",
+                    )
+                    if estimate is None:
+                        continue
                     
                     # Create a simplified 3D box representation
                     box_3d = {
                         'bbox_2d': bbox,
-                        'depth_value': depth_value,
-                        'depth_method': depth_method,
+                        'depth_value': estimate['depth_value'],
+                        'depth_method': estimate['depth_method'],
                         'class_name': class_name,
                         'object_id': obj_id,
                         'score': score,
-                        'location_cam': location_cam,
-                        'location_world': location_world
+                        'location_cam': estimate['location_cam'],
+                        'location_world': estimate['location_world']
                     }
                     
                     boxes_3d.append(box_3d)

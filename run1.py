@@ -10,11 +10,12 @@ import setup_path
 import cosysairsim as airsim
 from cosysairsim import utils as airsim_utils
 
-from back_project import estimate_from_depth_map
+from camera_module import build_camera_params_from_airsim
+from camera_module import estimate_from_depth_map
 from dataset_export import SegmentationDatasetExporter
 from depth_model import DepthEstimator
-from load_camera_params import build_camera_params_from_airsim
 from segmentation_helpers import compute_masked_depth_stats
+from segmentation_helpers import find_mask_centroid
 
 use_model = False
 enable_tracking = True
@@ -138,13 +139,6 @@ def get_color_encoded_id(instance_id):
         return int(color[0]) + (int(color[1]) << 8) + (int(color[2]) << 16)
     except Exception:
         return None
-
-def find_mask_centroid(seg_mask, instance_id):
-    coords = None if seg_mask is None or instance_id is None else np.argwhere(seg_mask == int(instance_id))
-    if coords is None or coords.size == 0:
-        return None
-    center_y, center_x = coords.mean(axis=0)
-    return float(center_x), float(center_y)
 
 
 def draw_bbox(image, bbox, label, color):
@@ -566,7 +560,7 @@ def main():
                             # Find all pixels belonging to this instance and compute their centroid
                             encoded_color_id = get_color_encoded_id(instance_id)
                             centroid = find_mask_centroid(seg_mask, encoded_color_id)
-                            depth_stats = compute_masked_depth_stats(frame_depth_planar, seg_mask, instance_id)
+                            depth_stats = compute_masked_depth_stats(frame_depth_planar, seg_mask, encoded_color_id)
                             
                             mask_estimate = None
                             if centroid is not None and frame_depth_planar is not None:

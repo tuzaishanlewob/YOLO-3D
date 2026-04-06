@@ -10,6 +10,19 @@ import numpy as np
 import cv2
 
 
+def find_mask_centroid(seg_mask, encoded_id):
+    """Return (x, y) centroid for the region matching encoded_id in seg_mask."""
+    if seg_mask is None or encoded_id is None:
+        return None
+
+    coords = np.argwhere(seg_mask == int(encoded_id))
+    if coords.size == 0:
+        return None
+
+    center_y, center_x = coords.mean(axis=0)
+    return float(center_x), float(center_y)
+
+
 def get_airsim_segmentation_mask(airsim_client, camera_name, vehicle_name, airsim_module):
     """
     Fetch instance segmentation mask from AirSim.
