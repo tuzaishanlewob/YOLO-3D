@@ -111,9 +111,25 @@ class DepthEstimator:
             'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
             'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]}
         }
+
+        encoder_aliases = {
+            'small': 'vits',
+            'base': 'vitb',
+            'large': 'vitl',
+            'indoor': 'vits',
+            'outdoor': 'vits',
+        }
+
+        encoder_key = str(encoder).lower()
+        if encoder_key in encoder_aliases:
+            encoder_key = encoder_aliases[encoder_key]
+        if encoder_key not in model_configs:
+            print(f"Warning: Unknown raw depth encoder '{encoder}', defaulting to 'vits'")
+            encoder_key = 'vits'
+
         max_depth = 80
-        print(f"Loading raw checkpoint: {weights_path} (encoder={encoder})")
-        model = DepthAnythingV2(**{**model_configs[encoder], 'max_depth': max_depth})
+        print(f"Loading raw checkpoint: {weights_path} (encoder={encoder_key})")
+        model = DepthAnythingV2(**{**model_configs[encoder_key], 'max_depth': max_depth})
         model.load_state_dict(torch.load(weights_path, map_location='cpu'))
         model.eval()
         model = model.to(self.device)

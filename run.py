@@ -21,13 +21,14 @@ def main():
     # ===============================================
     
     # Input/Output
-    source = 0  # Path to input video file or webcam index (0 for default camera)
+    source = r"E:\Videos\80.mp4"  # Path to input video file or webcam index (0 for default camera)
     output_path = "output.mp4"  # Path to output video file
     
     # Model settings
     yolo_model_size = "nano"  # YOLOv11 model size: "nano", "small", "medium", "large", "extra"
-    yolo_weights = None         # Path to your custom .pt file or model ID (None to use pretrained size above)
+    yolo_weights = r"E:\Programs\AirSim\Cosys-AirSim\runs\detect\train9\weights\best.pt"       # Path to your custom .pt file or model ID (None to use pretrained size above)
     depth_model_size = "small"  # Depth Anything v2 model size: "small", "base", "large"
+    depth_weights = r"E:\Programs\AirSim\Cosys-AirSim\PythonClient\YOLO-3D\checkpoints\depth_anything_v2_metric_hypersim_vits.pth" # Optional path/model id for depth model (e.g. .pth/.pt checkpoint)
     
     # Device settings
     device = 0  # Force CPU for stability
@@ -59,7 +60,11 @@ def main():
         device=device,
         weights_path=yolo_weights,
     )
-    depth_estimator = init_depth_estimator(model_size=depth_model_size, device=device)
+    depth_estimator = init_depth_estimator(
+        model_size=depth_model_size,
+        device=device,
+        weights_path=depth_weights,
+    )
     
     # Initialize 3D bounding box estimator with default parameters
     # Simplified approach - focus on 2D detection with depth information
